@@ -1,0 +1,30 @@
+[package]
+name = "stoneform-mac"
+description = "The StoneForm app: window, WebKit sign-in and wiring of the ports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "StoneForm"
+path = "src/main.rs"
+
+[dependencies]
+stoneform-domain.workspace = true
+stoneform-app.workspace = true
+stoneform-adapter-macos.workspace = true
+stoneform-adapter-disk.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
+objc2-web-kit.workspace = true
+block2.workspace = true
+dispatch2.workspace = true
+
+[lints]
+workspace = true

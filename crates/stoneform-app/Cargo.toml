@@ -1,0 +1,18 @@
+[package]
+name = "stoneform-app"
+description = "StoneForm's use cases and the driven ports they depend on"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+stoneform-domain.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true

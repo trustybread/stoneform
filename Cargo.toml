@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+# Internal crates
+stoneform-domain = { path = "crates/stoneform-domain" }
+stoneform-app = { path = "crates/stoneform-app" }
+stoneform-adapter-macos = { path = "crates/stoneform-adapter-macos" }
+stoneform-adapter-disk = { path = "crates/stoneform-adapter-disk" }
+
+# Shared
+thiserror = "2.0.21"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tokio = { version = "1.54.1", default-features = false }
+url = "2.5.8"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+toml = "1.2.1"
+directories = "6.0.0"
+tempfile = "3"
+
+# macOS
+security-framework = "3.7.0"
+objc2 = "0.6.5"
+objc2-foundation = "0.3.2"
+objc2-app-kit = "0.3.2"
+objc2-web-kit = "0.3.2"
+block2 = "0.6.2"
+dispatch2 = "0.3.1"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

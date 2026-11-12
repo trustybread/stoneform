@@ -1,0 +1,17 @@
+[package]
+name = "stoneform-adapter-macos"
+description = "macOS adapters for StoneForm's driven ports: Keychain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+stoneform-domain.workspace = true
+stoneform-app.workspace = true
+security-framework.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
