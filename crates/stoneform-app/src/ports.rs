@@ -119,6 +119,10 @@ impl DiskError {
 /// Files the game keeps outside local storage (its `.app` and friends):
 /// staged one by one, then moved into place together.
 pub trait LooseFiles: Send + Sync {
+    /// Whether `file` is already in place under `flavor_root` with the right
+    /// content: an update leaves such files alone.
+    fn is_current(&self, flavor_root: &Path, file: &LooseFile) -> bool;
+
     /// Whether `file` is already staged intact under `flavor_root`, by an
     /// earlier, interrupted run.
     fn is_staged(&self, flavor_root: &Path, file: &LooseFile) -> bool;
@@ -131,8 +135,9 @@ pub trait LooseFiles: Send + Sync {
         blob: Bytes,
     ) -> impl Future<Output = Result<(), DiskError>> + Send;
 
-    /// Moves every staged file to its place under `flavor_root`.
-    fn commit(&self, flavor_root: &Path, files: &[LooseFile]) -> Result<(), DiskError>;
+    /// Moves the staged `files` to their places under `flavor_root`, then
+    /// deletes `obsolete` paths, which the new build no longer has.
+    fn commit(&self, flavor_root: &Path, files: &[LooseFile], obsolete: &[String]) -> Result<(), DiskError>;
 }
 
 /// The game's local CASC storage (`<root>/Data`), shared by every WoW flavor.
@@ -174,6 +179,8 @@ pub struct InstalledBuild {
     pub version: String,
     /// The build config's hex key.
     pub build_key: String,
+    /// The tag string the installed files were selected with.
+    pub tags: String,
 }
 
 /// The records that say which build is installed, for the game and Battle.net.

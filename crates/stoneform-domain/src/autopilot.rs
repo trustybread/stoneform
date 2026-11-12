@@ -7,6 +7,9 @@ pub struct AutopilotFacts {
     pub game_running: bool,
     /// The Battle.net app or its Agent, which also writes game files.
     pub battle_net_running: bool,
+    /// Blizzard serves a newer build than the installed one. False when
+    /// offline: the installed build is launched, and the game says if it's too old.
+    pub update_available: bool,
 }
 
 /// The next thing the autopilot does. Only `SignIn` and `Install` wait for the
@@ -16,9 +19,10 @@ pub enum AutopilotStep {
     /// The game runs already: show it instead of starting a second one.
     BringGameForward,
     SignIn,
-    /// Installing writes game files, which Battle.net may be writing too.
+    /// Installing or updating writes game files, which Battle.net may be writing too.
     WaitForBattleNet,
     Install,
+    Update,
     Launch,
 }
 
@@ -27,10 +31,12 @@ pub fn next_step(facts: &AutopilotFacts) -> AutopilotStep {
         AutopilotStep::BringGameForward
     } else if !facts.signed_in {
         AutopilotStep::SignIn
-    } else if !facts.installed && facts.battle_net_running {
+    } else if (!facts.installed || facts.update_available) && facts.battle_net_running {
         AutopilotStep::WaitForBattleNet
     } else if !facts.installed {
         AutopilotStep::Install
+    } else if facts.update_available {
+        AutopilotStep::Update
     } else {
         AutopilotStep::Launch
     }
@@ -41,7 +47,18 @@ mod tests {
     use super::*;
 
     fn step(signed_in: bool, installed: bool, game_running: bool, battle_net_running: bool) -> AutopilotStep {
-        next_step(&AutopilotFacts { signed_in, installed, game_running, battle_net_running })
+        next_step(&AutopilotFacts { signed_in, installed, game_running, battle_net_running, update_available: false })
+    }
+
+    fn update_step(battle_net_running: bool, game_running: bool) -> AutopilotStep {
+        let facts = AutopilotFacts {
+            signed_in: true,
+            installed: true,
+            game_running,
+            battle_net_running,
+            update_available: true,
+        };
+        next_step(&facts)
     }
 
     #[test]
@@ -56,6 +73,13 @@ mod tests {
     fn a_running_game_comes_first() {
         assert_eq!(step(false, false, true, true), AutopilotStep::BringGameForward);
         assert_eq!(step(true, true, true, false), AutopilotStep::BringGameForward);
+    }
+
+    #[test]
+    fn updates_before_launching_but_never_under_a_running_game() {
+        assert_eq!(update_step(false, false), AutopilotStep::Update);
+        assert_eq!(update_step(true, false), AutopilotStep::WaitForBattleNet);
+        assert_eq!(update_step(false, true), AutopilotStep::BringGameForward);
     }
 
     #[test]

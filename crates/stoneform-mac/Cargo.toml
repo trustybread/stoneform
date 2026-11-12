@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 stoneform-domain.workspace = true
 stoneform-app.workspace = true
+stoneform-tact.workspace = true
 stoneform-adapter-macos.workspace = true
 stoneform-adapter-disk.workspace = true
 stoneform-adapter-blizzard.workspace = true

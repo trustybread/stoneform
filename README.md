@@ -3,8 +3,8 @@
 A small native launcher for WoW: Forever on Apple Silicon Macs: sign in once,
 then StoneForm installs, updates and starts the game. No Battle.net app, no Rosetta.
 
-Status: sign-in, fresh install and launch work; updates (milestone 4) and a
-signed release (milestone 5) are next. The design lives in the
+Status: sign-in, install, updates and launch work; a signed release
+(milestone 5) is next. The design lives in the
 [StoneForm Design](https://claude.ai/artifact/RekR3B2e9W6hjJSZ6xYJJ4) doc.
 
 ## Run
@@ -23,7 +23,9 @@ Opening StoneForm runs the autopilot:
    keychain (service "StoneForm launch tokens").
 3. Install, once: choose a folder and language. The download resumes after a
    pause, a quit or a crash. Battle.net must not be running meanwhile.
-4. Launch: the token goes to the game the way Battle.net hands it over, WoW
+4. Update, when Blizzard serves a newer build: only what changed is
+   downloaded. Offline, the installed build is launched.
+5. Launch: the token goes to the game the way Battle.net hands it over, WoW
    starts signed in, and StoneForm quits.
 
 Settings live in `~/Library/Application Support/StoneForm/settings.toml`,
@@ -33,11 +35,16 @@ cached manifests and CDN indexes in `~/Library/Caches/StoneForm`.
 
 ```sh
 cargo run --release -p stoneform-dev -- plan                   # what a fresh install downloads
-cargo run --release -p stoneform-dev -- install "<folder>"     # install from a terminal
+cargo run --release -p stoneform-dev -- install "<folder>"     # install or update from a terminal
+cargo run --release -p stoneform-dev -- check "<folder>"       # installed build vs live build
+cargo run --release -p stoneform-dev -- launch "<folder>"      # start WoW with the saved sign-in
 ```
 
-`--region`, `--locale` and `--cache` work for both; `install --skip-storage`
-installs everything but local storage, to test the rest quickly.
+`--region`, `--locale` and `--cache` work for all of them. `install
+--skip-storage` installs everything but local storage, to test the rest
+quickly. `--build-config HEX --cdn-config HEX --version NAME` pins an older
+build (wago.tools lists them), which is how updates are tested without
+waiting for Blizzard: switch a folder to an older build, then update it.
 
 ## Test
 

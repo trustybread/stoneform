@@ -17,6 +17,7 @@ stoneform-tact.workspace = true
 stoneform-adapter-blizzard.workspace = true
 stoneform-adapter-casc.workspace = true
 stoneform-adapter-disk.workspace = true
+stoneform-adapter-macos.workspace = true
 directories.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

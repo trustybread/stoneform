@@ -81,8 +81,8 @@ where
 
         let mut writer = self.storage.open(&data_root)?;
         let stored: u64 = plan.storage.iter().filter(|item| writer.contains(&item.key)).map(|item| item.size).sum();
-        let staged: u64 =
-            plan.loose.iter().filter(|file| self.loose.is_staged(&flavor_root, file)).map(loose_bytes).sum();
+        let loose = self.loose_work(plan, &flavor_root);
+        let staged = loose.in_place;
         let needed = total.saturating_sub(stored + staged);
         if let Some(available) = self.storage.available_space(target.root)
             && available < needed + SPARE_BYTES
@@ -111,25 +111,8 @@ where
         drop(downloads);
         writer.finish()?;
 
-        // Staged by content: several paths with the same content (an app
-        // bundle repeats small resources) are fetched and staged once, and
-        // count for all their files.
-        let mut missing: Vec<(usize, u64)> = Vec::new();
-        let mut seen: HashMap<ContentKey, usize> = HashMap::new();
-        for (n, file) in plan.loose.iter().enumerate() {
-            if self.loose.is_staged(&flavor_root, file) {
-                continue;
-            }
-            match seen.get(&file.content_key) {
-                Some(&slot) => missing[slot].1 += loose_bytes(file),
-                None => {
-                    seen.insert(file.content_key, missing.len());
-                    missing.push((n, loose_bytes(file)));
-                }
-            }
-        }
         let flavor = &flavor_root;
-        let mut stages = stream::iter(missing)
+        let mut stages = stream::iter(loose.fetch)
             .map(|(n, bytes)| async move {
                 let file = &plan.loose[n];
                 let blob = self.fetch_loose(plan, file).await?;
@@ -144,7 +127,7 @@ where
         drop(stages);
 
         report(InstallStage::Finishing, done);
-        self.loose.commit(&flavor_root, &plan.loose)?;
+        self.loose.commit(&flavor_root, &loose.commit, &plan.obsolete)?;
         self.records.record_build(target.root, plan, target.region)?;
         self.records.set_language(&flavor_root, target.locale)?;
         // Battle.net reads these to recognize the install; the game doesn't need them.
@@ -154,6 +137,34 @@ where
         report(InstallStage::Finishing, total);
         tracing::info!(version = %plan.build.version, root = %target.root.display(), "installed");
         Ok(())
+    }
+
+    /// Sorts the files outside storage: already current on disk (an update
+    /// leaves them alone), staged by an interrupted run, or to fetch. Fetched
+    /// by content: several paths with the same content (an app bundle repeats
+    /// small resources) are fetched and staged once, and count for all their files.
+    fn loose_work(&self, plan: &InstallPlan, flavor_root: &Path) -> LooseWork {
+        let mut work = LooseWork::default();
+        let mut seen: HashMap<ContentKey, usize> = HashMap::new();
+        for (n, file) in plan.loose.iter().enumerate() {
+            if self.loose.is_current(flavor_root, file) {
+                work.in_place += loose_bytes(file);
+                continue;
+            }
+            work.commit.push(file.clone());
+            if self.loose.is_staged(flavor_root, file) {
+                work.in_place += loose_bytes(file);
+                continue;
+            }
+            match seen.get(&file.content_key) {
+                Some(&slot) => work.fetch[slot].1 += loose_bytes(file),
+                None => {
+                    seen.insert(file.content_key, work.fetch.len());
+                    work.fetch.push((n, loose_bytes(file)));
+                }
+            }
+        }
+        work
     }
 
     /// The CDN indexes the game keeps under `Data/indices`, and the archive
@@ -246,6 +257,17 @@ where
             Source::File(kind) => self.cdn.file(cdn, kind, &file.encoding_key).await?,
         })
     }
+}
+
+/// What the files outside storage need.
+#[derive(Debug, Default)]
+struct LooseWork {
+    /// Bytes already current on disk or staged: counted as done.
+    in_place: u64,
+    /// Files to move into place at the end: all but the current ones.
+    commit: Vec<LooseFile>,
+    /// One file per content to fetch and stage, with the bytes it stands for.
+    fetch: Vec<(usize, u64)>,
 }
 
 /// A blob is what its key says: BLTE checked against the encoding key, raw
@@ -375,11 +397,16 @@ mod tests {
 
     #[derive(Default)]
     struct FakeLoose {
+        current: Mutex<HashSet<String>>,
         staged: Mutex<HashMap<ContentKey, Bytes>>,
         committed: Mutex<Vec<String>>,
+        removed: Mutex<Vec<String>>,
     }
 
     impl LooseFiles for FakeLoose {
+        fn is_current(&self, _: &Path, file: &LooseFile) -> bool {
+            self.current.lock().unwrap().contains(&file.path)
+        }
         fn is_staged(&self, _: &Path, file: &LooseFile) -> bool {
             self.staged.lock().unwrap().contains_key(&file.content_key)
         }
@@ -387,8 +414,9 @@ mod tests {
             self.staged.lock().unwrap().insert(file.content_key, blob);
             Ok(())
         }
-        fn commit(&self, _: &Path, files: &[LooseFile]) -> Result<(), DiskError> {
+        fn commit(&self, _: &Path, files: &[LooseFile], obsolete: &[String]) -> Result<(), DiskError> {
             self.committed.lock().unwrap().extend(files.iter().map(|file| file.path.clone()));
+            self.removed.lock().unwrap().extend(obsolete.iter().cloned());
             Ok(())
         }
     }
@@ -477,6 +505,7 @@ mod tests {
             archives: vec![ARCHIVE.to_owned()],
             storage,
             loose,
+            obsolete: vec![],
         };
         Fixture { cdn, plan, keys: [a, b, c] }
     }
@@ -554,6 +583,28 @@ mod tests {
         assert_eq!(installer.loose.committed.lock().unwrap().len(), 2);
         let downloaded = progress.iter().filter(|p| p.stage == InstallStage::Downloading).map(|p| p.done).max();
         assert_eq!(downloaded, Some(plan.total_bytes()));
+    }
+
+    /// An update: storage holds the old build's blobs, a loose file is current
+    /// already, and one the new build dropped goes away.
+    #[tokio::test]
+    async fn updates_only_what_changed_and_removes_what_is_gone() {
+        let Fixture { cdn, mut plan, keys } = fixture();
+        plan.obsolete = vec!["old/gone.txt".to_owned()];
+        let storage = FakeStorage::default();
+        storage.0.lock().unwrap().published.insert(keys[0], b"old blob".to_vec());
+        let installer = installer(cdn, storage.clone());
+        installer.loose.current.lock().unwrap().insert("run.sh".to_owned());
+
+        let (result, progress) = run(&installer, &plan).await;
+
+        result.unwrap();
+        // The current loose file is neither fetched nor moved; only the
+        // storage file of its own is fetched whole.
+        assert_eq!(*installer.cdn.file_fetches.lock().unwrap(), 1);
+        assert!(installer.loose.committed.lock().unwrap().is_empty());
+        assert_eq!(*installer.loose.removed.lock().unwrap(), vec!["old/gone.txt".to_owned()]);
+        assert_eq!(progress.last().map(|p| p.done), Some(plan.total_bytes()));
     }
 
     #[tokio::test]

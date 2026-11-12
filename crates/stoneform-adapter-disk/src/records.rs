@@ -34,6 +34,7 @@ impl InstallRecords for DiskInstallRecords {
             .map(|row| InstalledBuild {
                 version: row.get("Version").unwrap_or_default().to_owned(),
                 build_key: row.get("Build Key").unwrap_or_default().to_owned(),
+                tags: row.get("Tags").unwrap_or_default().to_owned(),
             });
         Ok(installed)
     }
@@ -193,7 +194,8 @@ mod installed_tests {
 
     use super::*;
 
-    const HEADER: &str = "Branch!STRING:0|Active!DEC:1|Build Key!HEX:16|Version!STRING:0|Product!STRING:0";
+    const HEADER: &str =
+        "Branch!STRING:0|Active!DEC:1|Build Key!HEX:16|Tags!STRING:0|Version!STRING:0|Product!STRING:0";
 
     fn root_with(build_info: &str, app: bool) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -206,16 +208,22 @@ mod installed_tests {
 
     #[test]
     fn finds_the_active_forever_row() {
-        let dir = root_with(&format!("{HEADER}\neu|1|abc|12.0.0.1|wow\neu|1|def|1.60.1.70888|wowf\n"), true);
+        let dir =
+            root_with(&format!("{HEADER}\neu|1|abc|OSX|12.0.0.1|wow\neu|1|def|OSX enUS|1.60.1.70888|wowf\n"), true);
         let installed = DiskInstallRecords.installed(dir.path(), &WOW_FOREVER).unwrap().unwrap();
-        assert_eq!(installed, InstalledBuild { version: "1.60.1.70888".to_owned(), build_key: "def".to_owned() });
+        let expected = InstalledBuild {
+            version: "1.60.1.70888".to_owned(),
+            build_key: "def".to_owned(),
+            tags: "OSX enUS".to_owned(),
+        };
+        assert_eq!(installed, expected);
     }
 
     #[test]
     fn needs_both_the_row_and_the_app() {
-        let other_flavor = root_with(&format!("{HEADER}\neu|1|abc|12.0.0.1|wow\n"), true);
+        let other_flavor = root_with(&format!("{HEADER}\neu|1|abc|OSX|12.0.0.1|wow\n"), true);
         assert_eq!(DiskInstallRecords.installed(other_flavor.path(), &WOW_FOREVER).unwrap(), None);
-        let no_app = root_with(&format!("{HEADER}\neu|1|def|1.60.1.70888|wowf\n"), false);
+        let no_app = root_with(&format!("{HEADER}\neu|1|def|OSX|1.60.1.70888|wowf\n"), false);
         assert_eq!(DiskInstallRecords.installed(no_app.path(), &WOW_FOREVER).unwrap(), None);
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(DiskInstallRecords.installed(empty.path(), &WOW_FOREVER).unwrap(), None);

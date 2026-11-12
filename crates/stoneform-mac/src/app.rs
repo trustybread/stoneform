@@ -91,10 +91,14 @@ pub struct Download {
     /// 0 while the size is not known yet.
     pub total: u64,
     pub seconds_left: Option<u64>,
+    /// Updating an installed game rather than installing it.
+    pub update: bool,
 }
 
 impl Download {
-    const PREPARING: Download = Download { stage: InstallStage::Preparing, done: 0, total: 0, seconds_left: None };
+    fn preparing(update: bool) -> Download {
+        Download { stage: InstallStage::Preparing, done: 0, total: 0, seconds_left: None, update }
+    }
 }
 
 pub fn install(app: App) {
@@ -140,14 +144,17 @@ pub fn sign_out() {
     });
 }
 
-/// Installs into `folder`, or continues an interrupted install there.
+/// Installs into `folder`, updates the game there, or continues either
+/// after an interruption: one path, since an update is an install that
+/// finds most of its files in place.
 pub fn start_install(folder: PathBuf, locale: Locale) {
     let mut running = INSTALL.lock().expect("never poisoned");
     if running.as_ref().is_some_and(|task| !task.is_finished()) {
         return;
     }
     let run = INSTALL_RUN.fetch_add(1, Ordering::SeqCst) + 1;
-    show_download(run, Download::PREPARING);
+    let update = app().records.installed(&folder, &WOW_FOREVER).ok().flatten().is_some();
+    show_download(run, Download::preparing(update));
     *running = Some(app().runtime.spawn(async move {
         match run_install(run, &folder, &locale).await {
             Ok(()) => autopilot().await,
@@ -166,7 +173,7 @@ pub fn pause_install() {
     if let Some(task) = INSTALL.lock().expect("never poisoned").take() {
         task.abort();
     }
-    let last = LAST_DOWNLOAD.lock().expect("never poisoned").unwrap_or(Download::PREPARING);
+    let last = LAST_DOWNLOAD.lock().expect("never poisoned").unwrap_or(Download::preparing(false));
     show(Status::Paused(Download { seconds_left: None, ..last }));
 }
 
@@ -190,11 +197,16 @@ async fn run_install(run: u64, folder: &Path, locale: &Locale) -> Result<(), Str
     // From settings, not the token: reading the token can make macOS ask for
     // the Keychain password, and installing doesn't need it.
     let region = app().session.region().map_err(|error| error.to_string())?;
-    tracing::info!(folder = %folder.display(), %locale, %region, "installing");
+    let installed = app().records.installed(folder, &WOW_FOREVER).map_err(|error| error.to_string())?;
+    let update = installed.is_some();
+    tracing::info!(folder = %folder.display(), %locale, %region, update, "installing");
 
     let installer = &app().installer;
-    let plan = installer.plan(&WOW_FOREVER, region, locale, |_| false, &|_| {}).await.map_err(|e| e.to_string())?;
-    let meter = Mutex::new(Meter::default());
+    let plan = installer
+        .plan(&WOW_FOREVER, region, locale, installed.as_ref(), &|_| {})
+        .await
+        .map_err(|error| error.to_string())?;
+    let meter = Mutex::new(Meter { update, ..Meter::default() });
     let target = InstallTarget { root: folder, product: &WOW_FOREVER, region, locale };
     installer
         .apply(&plan, target, &|progress| {
@@ -222,6 +234,7 @@ fn show_download(run: u64, download: Download) {
 struct Meter {
     last_shown: Option<(Instant, InstallStage)>,
     samples: VecDeque<(Instant, u64)>,
+    update: bool,
 }
 
 impl Meter {
@@ -245,7 +258,8 @@ impl Meter {
             (seconds >= 3.0 && speed > 0.0)
                 .then(|| (progress.total.saturating_sub(progress.done) as f64 / speed) as u64)
         });
-        Some(Download { stage: progress.stage, done: progress.done, total: progress.total, seconds_left })
+        let (stage, done, total, update) = (progress.stage, progress.done, progress.total, self.update);
+        Some(Download { stage, done, total, seconds_left, update })
     }
 }
 
@@ -268,11 +282,16 @@ async fn autopilot() {
         };
         let root = settings.install_path.clone().unwrap_or_else(|| PathBuf::from(DEFAULT_INSTALL_PATH));
         let running = app().launcher.running(&root);
+        let update_available = match (&installed, signed_in) {
+            (Some(installed), true) => update_available(installed).await,
+            _ => false,
+        };
         let facts = AutopilotFacts {
             signed_in,
             installed: installed.is_some(),
             game_running: running.game.is_some(),
             battle_net_running: running.battle_net,
+            update_available,
         };
         match next_step(&facts) {
             AutopilotStep::BringGameForward => {
@@ -303,6 +322,14 @@ async fn autopilot() {
                 let locale = settings.locale.unwrap_or_else(|| default_locale(&locales));
                 return show(Status::ChooseInstall(InstallChoice { folder: root, locale, locales, error: None }));
             }
+            AutopilotStep::Update => {
+                let installed = installed.as_ref().expect("an update needs an install");
+                // The language the install was made in; else the one its tags name.
+                let locale = settings.locale.clone().or_else(|| {
+                    stoneform_tact::languages::text(&installed.tags).and_then(|text| Locale::parse(text).ok())
+                });
+                return start_install(root, locale.unwrap_or_else(|| default_locale(&forever_locales())));
+            }
             AutopilotStep::Launch => {
                 show(Status::Launching);
                 match launch(&root, settings.locale.as_ref()) {
@@ -316,6 +343,29 @@ async fn autopilot() {
                     Err(error) => return show(Status::Failed(error.to_string())),
                 }
             }
+        }
+    }
+}
+
+/// Whether Blizzard serves a newer build. Offline, or when the version
+/// service fails, there is no update: the installed build is launched.
+async fn update_available(installed: &stoneform_app::ports::InstalledBuild) -> bool {
+    let region = match app().session.region() {
+        Ok(region) => region,
+        Err(error) => {
+            tracing::warn!(%error, "cannot tell the region; not checking for updates");
+            return false;
+        }
+    };
+    match app().installer.check(&WOW_FOREVER, region, installed).await {
+        Ok(Some(live)) => {
+            tracing::info!(installed = %installed.version, live = %live.version, "an update is available");
+            true
+        }
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(%error, "cannot check for updates; launching the installed build");
+            false
         }
     }
 }

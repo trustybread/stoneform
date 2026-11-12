@@ -44,6 +44,13 @@ fn staged_path(flavor_root: &Path, key: &ContentKey) -> PathBuf {
 }
 
 impl LooseFiles for DiskLooseFiles {
+    fn is_current(&self, flavor_root: &Path, file: &LooseFile) -> bool {
+        let Ok(path) = safe_join(flavor_root, &file.path) else { return false };
+        // Size first: it settles most changed files without reading them.
+        fs::metadata(&path).is_ok_and(|meta| meta.is_file() && meta.len() == file.size)
+            && content_key_of(&path).is_ok_and(|key| key == file.content_key)
+    }
+
     fn is_staged(&self, flavor_root: &Path, file: &LooseFile) -> bool {
         // Only verified files are renamed into the staging name, so its size suffices.
         fs::metadata(staged_path(flavor_root, &file.content_key)).is_ok_and(|meta| meta.len() == file.size)
@@ -59,8 +66,48 @@ impl LooseFiles for DiskLooseFiles {
             .map_err(DiskError::new)
     }
 
-    fn commit(&self, flavor_root: &Path, files: &[LooseFile]) -> Result<(), DiskError> {
-        commit(flavor_root, files).map_err(DiskError::new)
+    fn commit(&self, flavor_root: &Path, files: &[LooseFile], obsolete: &[String]) -> Result<(), DiskError> {
+        commit(flavor_root, files).map_err(DiskError::new)?;
+        remove_obsolete(flavor_root, obsolete);
+        Ok(())
+    }
+}
+
+/// MD5 of a file's content, read in pieces: the game binary is over 100 MB.
+fn content_key_of(path: &Path) -> io::Result<ContentKey> {
+    use md5::{Digest, Md5};
+    let mut file = File::open(path)?;
+    let mut hasher = Md5::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    ContentKey::from_slice(&hasher.finalize()).ok_or_else(|| io::Error::other("MD5 is 16 bytes"))
+}
+
+/// Deletes files an update no longer has, then folders it left empty. A
+/// leftover file does no harm, so failures are only logged.
+fn remove_obsolete(flavor_root: &Path, obsolete: &[String]) {
+    for path in obsolete {
+        let Ok(full) = safe_join(flavor_root, path) else { continue };
+        match fs::remove_file(&full) {
+            Ok(()) => tracing::info!(path, "removed a file the new build no longer has"),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::warn!(path, %error, "could not remove an obsolete file");
+                continue;
+            }
+        }
+        // Empty folders up to, not including, the flavor folder.
+        for folder in full.ancestors().skip(1).take_while(|folder| *folder != flavor_root) {
+            if fs::remove_dir(folder).is_err() {
+                break;
+            }
+        }
     }
 }
 
@@ -177,7 +224,7 @@ mod tests {
             store.stage(dir.path(), file, blte(content)).await.unwrap();
             assert!(store.is_staged(dir.path(), file));
         }
-        store.commit(dir.path(), &[script.clone(), data.clone()]).unwrap();
+        store.commit(dir.path(), &[script.clone(), data.clone()], &[]).unwrap();
 
         let script_path = dir.path().join(&script.path);
         assert_eq!(fs::read(&script_path).unwrap(), b"#!/bin/sh\necho hi\n");
@@ -192,7 +239,7 @@ mod tests {
         let binary = [0xcf, 0xfa, 0xed, 0xfe, 1, 2, 3, 4];
         let file = loose("World of Warcraft.app/Contents/MacOS/World of Warcraft", &binary);
         DiskLooseFiles.stage(dir.path(), &file, blte(&binary)).await.unwrap();
-        DiskLooseFiles.commit(dir.path(), std::slice::from_ref(&file)).unwrap();
+        DiskLooseFiles.commit(dir.path(), std::slice::from_ref(&file), &[]).unwrap();
         let mode = fs::metadata(dir.path().join(&file.path)).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o755);
     }
@@ -207,11 +254,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn leaves_current_files_alone_and_removes_obsolete_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let kept = loose("World of Warcraft.app/Contents/Info.plist", b"<plist/>");
+        DiskLooseFiles.stage(dir.path(), &kept, blte(b"<plist/>")).await.unwrap();
+        DiskLooseFiles.commit(dir.path(), std::slice::from_ref(&kept), &[]).unwrap();
+        fs::create_dir_all(dir.path().join("Old/Nested")).unwrap();
+        fs::write(dir.path().join("Old/Nested/gone.txt"), b"old").unwrap();
+
+        assert!(DiskLooseFiles.is_current(dir.path(), &kept));
+        assert!(!DiskLooseFiles.is_current(dir.path(), &loose(&kept.path, b"<plist version=2/>")));
+        assert!(!DiskLooseFiles.is_current(dir.path(), &loose("missing.txt", b"x")));
+
+        DiskLooseFiles.commit(dir.path(), &[], &["Old/Nested/gone.txt".to_owned(), "../escape".to_owned()]).unwrap();
+
+        assert!(!dir.path().join("Old").exists(), "emptied folders go too");
+        assert!(dir.path().join(&kept.path).exists());
+    }
+
+    #[tokio::test]
     async fn writes_shared_content_to_every_path() {
         let dir = tempfile::tempdir().unwrap();
         let (first, second) = (loose("a/one.txt", b"same"), loose("b/two.txt", b"same"));
         DiskLooseFiles.stage(dir.path(), &first, blte(b"same")).await.unwrap();
-        DiskLooseFiles.commit(dir.path(), &[first.clone(), second.clone()]).unwrap();
+        DiskLooseFiles.commit(dir.path(), &[first.clone(), second.clone()], &[]).unwrap();
         assert_eq!(fs::read(dir.path().join(&first.path)).unwrap(), b"same");
         assert_eq!(fs::read(dir.path().join(&second.path)).unwrap(), b"same");
     }

@@ -225,11 +225,13 @@ pub fn show(_mtm: MainThreadMarker, status: Status) {
 }
 
 fn download_text(download: &Download) -> String {
+    let verb = if download.update { "Updating" } else { "Downloading" };
     match download.stage {
+        InstallStage::Preparing if download.update => "Preparing the update…".to_owned(),
         InstallStage::Preparing => "Preparing the download…".to_owned(),
         InstallStage::Finishing => "Finishing…".to_owned(),
         InstallStage::Downloading => {
-            let mut text = format!("Downloading · {} of {}", format_bytes(download.done), format_bytes(download.total));
+            let mut text = format!("{verb} · {} of {}", format_bytes(download.done), format_bytes(download.total));
             if let Some(left) = download.seconds_left {
                 text.push_str(" · ");
                 text.push_str(&time_left(left));

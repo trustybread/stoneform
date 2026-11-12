@@ -1661,6 +1661,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "directories",
+ "md-5",
  "serde",
  "stoneform-app",
  "stoneform-domain",
@@ -1710,6 +1711,7 @@ dependencies = [
  "stoneform-adapter-blizzard",
  "stoneform-adapter-casc",
  "stoneform-adapter-disk",
+ "stoneform-adapter-macos",
  "stoneform-app",
  "stoneform-domain",
  "stoneform-tact",
@@ -1743,6 +1745,7 @@ dependencies = [
  "stoneform-adapter-macos",
  "stoneform-app",
  "stoneform-domain",
+ "stoneform-tact",
  "thiserror",
  "tokio",
  "tracing",

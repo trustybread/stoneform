@@ -5,6 +5,8 @@ pub mod plan;
 
 pub use apply::{InstallProgress, InstallStage, InstallTarget};
 
+use std::collections::HashSet;
+
 use bytes::Bytes;
 use futures_util::StreamExt;
 use futures_util::stream;
@@ -14,11 +16,11 @@ use stoneform_tact::config::{BuildConfig, CdnConfig, CdnKind};
 use stoneform_tact::download::DownloadManifest;
 use stoneform_tact::encoding::EncodingTable;
 use stoneform_tact::install::InstallManifest;
-use stoneform_tact::keys::EncodingKey;
+use stoneform_tact::keys::ContentKey;
 use stoneform_tact::languages::Languages;
 use stoneform_tact::product_config::ProductConfig;
 
-use crate::ports::{ContentDelivery, DiskError, LiveBuild, RemoteError, VersionSource};
+use crate::ports::{CdnHosts, ContentDelivery, DiskError, InstalledBuild, LiveBuild, RemoteError, VersionSource};
 use plan::{LooseFile, PlanError, Source, StorageItem};
 
 /// Archive indexes fetched at once while planning, as Waypoint.
@@ -40,6 +42,9 @@ pub struct InstallPlan {
     /// Local storage files, in download order.
     pub storage: Vec<StorageItem>,
     pub loose: Vec<LooseFile>,
+    /// Paths of files outside storage that the installed build had and this
+    /// one doesn't; an update deletes them.
+    pub obsolete: Vec<String>,
 }
 
 impl InstallPlan {
@@ -110,19 +115,43 @@ impl<V, D, S, L, R> Installer<V, D, S, L, R> {
 }
 
 impl<V: VersionSource, D: ContentDelivery, S, L, R> Installer<V, D, S, L, R> {
-    /// Works out what installing `product`'s live build in `locale` takes.
-    /// `stored` says which storage files are already in place (an interrupted
-    /// install); they are left out.
+    /// The live build, if it differs from `installed`: an update is due.
+    pub async fn check(
+        &self,
+        product: &Product,
+        region: Region,
+        installed: &InstalledBuild,
+    ) -> Result<Option<LiveBuild>, InstallError> {
+        let live = self.versions.live(product.code, region).await?;
+        let current = live.build_config.to_hex().eq_ignore_ascii_case(&installed.build_key);
+        Ok((!current).then_some(live))
+    }
+
+    /// Works out what installing `product`'s live build in `locale` takes,
+    /// or updating to it when `installed` says what is there now.
     pub async fn plan(
         &self,
         product: &Product,
         region: Region,
         locale: &Locale,
-        stored: impl Fn(&EncodingKey) -> bool + Send + Sync,
+        installed: Option<&InstalledBuild>,
         progress: &(dyn Fn(PlanStep) + Send + Sync),
     ) -> Result<InstallPlan, InstallError> {
         progress(PlanStep::Version);
         let build = self.versions.live(product.code, region).await?;
+        self.plan_build(product, region, locale, build, installed, progress).await
+    }
+
+    /// Like `plan`, for a given build: an older one, to test updates with.
+    pub async fn plan_build(
+        &self,
+        product: &Product,
+        region: Region,
+        locale: &Locale,
+        build: LiveBuild,
+        installed: Option<&InstalledBuild>,
+        progress: &(dyn Fn(PlanStep) + Send + Sync),
+    ) -> Result<InstallPlan, InstallError> {
         let cdn = &build.cdn;
         let product_config_key = build.product_config.ok_or(InstallError::Missing("a product config"))?;
         let (build_config, cdn_config, product_config) = futures_util::try_join!(
@@ -149,7 +178,8 @@ impl<V: VersionSource, D: ContentDelivery, S, L, R> Installer<V, D, S, L, R> {
             &InstallManifest::parse(&install)?,
             &EncodingTable::parse(&encoding)?,
             &DownloadManifest::parse(&download)?,
-            stored,
+            // What the storage already holds is skipped while applying.
+            |_| false,
         )?;
         tracing::info!(
             version = %build.version,
@@ -184,6 +214,12 @@ impl<V: VersionSource, D: ContentDelivery, S, L, R> Installer<V, D, S, L, R> {
             plan::size_unarchived(&mut selection, ArchiveIndex::parse(&index)?.iter());
         }
         plan::order_for_download(&mut selection.storage);
+        let obsolete = match installed {
+            Some(installed) if !installed.build_key.eq_ignore_ascii_case(&build.build_config.to_hex()) => {
+                self.obsolete_files(cdn, installed, &selection.loose).await
+            }
+            _ => Vec::new(),
+        };
 
         let plan = InstallPlan {
             product: *product,
@@ -195,6 +231,7 @@ impl<V: VersionSource, D: ContentDelivery, S, L, R> Installer<V, D, S, L, R> {
             archives,
             storage: selection.storage,
             loose: selection.loose,
+            obsolete,
         };
         tracing::info!(
             storage_bytes = plan.storage_bytes(),
@@ -203,6 +240,38 @@ impl<V: VersionSource, D: ContentDelivery, S, L, R> Installer<V, D, S, L, R> {
             "install planned"
         );
         Ok(plan)
+    }
+}
+
+impl<V, D: ContentDelivery, S, L, R> Installer<V, D, S, L, R> {
+    /// Files outside storage the installed build has and the new one doesn't:
+    /// the old build's install manifest, selected with the installed tags,
+    /// minus the new paths. Without the old manifest nothing is deleted;
+    /// a leftover file does no harm.
+    async fn obsolete_files(&self, cdn: &CdnHosts, installed: &InstalledBuild, new: &[LooseFile]) -> Vec<String> {
+        let found = async {
+            let key = ContentKey::from_hex(&installed.build_key)
+                .map_err(|e| stoneform_tact::Error::Malformed(format!("installed build key: {e}")))?;
+            let config = self.cdn.config(cdn, &key).await?;
+            let install_key = BuildConfig::parse(utf8(&config, "installed build config")?).install()?;
+            let manifest = self.cdn.decoded(cdn, &install_key).await?;
+            let old: Vec<String> = InstallManifest::parse(&manifest)?
+                .select(&installed.tags)
+                .into_iter()
+                .map(|e| e.path.clone())
+                .collect();
+            Ok::<_, InstallError>(old)
+        };
+        match found.await {
+            Ok(old) => {
+                let kept: HashSet<&str> = new.iter().map(|file| file.path.as_str()).collect();
+                old.into_iter().filter(|path| !kept.contains(path.as_str())).collect()
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot tell which old files to remove; keeping them");
+                Vec::new()
+            }
+        }
     }
 }
 

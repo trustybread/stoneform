@@ -11,6 +11,7 @@ stoneform-domain.workspace = true
 stoneform-app.workspace = true
 stoneform-tact.workspace = true
 bytes.workspace = true
+md-5.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 serde.workspace = true
