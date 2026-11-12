@@ -4,12 +4,12 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use objc2_foundation::NSLocale;
-use stoneform_adapter_blizzard::{HttpContentDelivery, HttpVersionSource};
+use stoneform_adapter_blizzard::{HttpContentDelivery, HttpVersionSource, Throttle};
 use stoneform_adapter_casc::CascGameStorage;
 use stoneform_adapter_disk::{DiskInstallRecords, DiskLooseFiles, TomlSettingsStore};
 use stoneform_adapter_macos::{KeychainSecretStore, MacGameProcess, PrefsTokenHandoff};
@@ -36,6 +36,8 @@ pub struct App {
     pub installer: AppInstaller,
     pub launcher: AppLauncher,
     pub records: DiskInstallRecords,
+    /// The download speed limit every download shares.
+    pub throttle: Throttle,
     pub runtime: tokio::runtime::Runtime,
 }
 
@@ -46,11 +48,16 @@ static INSTALL: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 /// Bumped when an install starts or pauses: progress from an older run that
 /// is still queued for the window is dropped.
 static INSTALL_RUN: AtomicU64 = AtomicU64::new(0);
+/// The user held ⌥ at launch: stop before starting the game.
+static HOLD: AtomicBool = AtomicBool::new(false);
 /// The last progress shown, for the Paused state.
 static LAST_DOWNLOAD: Mutex<Option<Download>> = Mutex::new(None);
 
 /// Where StoneForm suggests installing when nothing was chosen yet.
 const DEFAULT_INSTALL_PATH: &str = "/Applications/World of Warcraft";
+/// How long quitting waits for Sparkle to finish checking and downloading
+/// a StoneForm update; StoneForm itself is a few megabytes.
+const SELF_UPDATE_GRACE: Duration = Duration::from_secs(20);
 /// How often StoneForm looks again whether Battle.net has quit.
 const BATTLE_NET_POLL: Duration = Duration::from_secs(2);
 /// How often progress reaches the window.
@@ -72,6 +79,9 @@ pub enum Status {
     WaitingForBattleNet,
     /// Handing the token over and starting the game; StoneForm quits after.
     Launching,
+    /// Installed and current, at this version, and the user held ⌥ at
+    /// launch: the window waits with a Play button, so its menus are usable.
+    Ready(String),
     Failed(String),
 }
 
@@ -91,13 +101,21 @@ pub struct Download {
     /// 0 while the size is not known yet.
     pub total: u64,
     pub seconds_left: Option<u64>,
-    /// Updating an installed game rather than installing it.
-    pub update: bool,
+    pub purpose: Purpose,
+}
+
+/// Why the installer runs; the same work, told differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    Install,
+    Update,
+    /// Verify and Repair: every file checked, what's missing or wrong fetched.
+    Repair,
 }
 
 impl Download {
-    fn preparing(update: bool) -> Download {
-        Download { stage: InstallStage::Preparing, done: 0, total: 0, seconds_left: None, update }
+    fn preparing(purpose: Purpose) -> Download {
+        Download { stage: InstallStage::Preparing, done: 0, total: 0, seconds_left: None, purpose }
     }
 }
 
@@ -119,10 +137,62 @@ fn show(status: Status) {
     on_main(move |mtm| ui::show(mtm, status));
 }
 
-/// Runs the autopilot from the top: sign in, install, then ready.
-pub fn start() {
+/// Runs the autopilot from the top: sign in, install, update, launch.
+/// `hold`: stop before launching (the user held ⌥ at launch).
+pub fn start(hold: bool) {
+    HOLD.store(hold, Ordering::SeqCst);
     show(Status::Checking);
     spawn(autopilot());
+}
+
+/// The download speed limit in bytes per second, if any.
+pub fn download_limit() -> Option<u64> {
+    app().throttle.limit()
+}
+
+/// Sets the download speed limit, at once for running downloads too, and
+/// remembers it.
+pub fn set_download_limit(limit: Option<u64>) {
+    app().throttle.set_limit(limit);
+    spawn(async move {
+        let saved = app().settings.load().and_then(|mut settings| {
+            settings.download_limit = limit;
+            app().settings.save(&settings)
+        });
+        if let Err(error) = saved {
+            tracing::warn!(%error, "could not save the download speed limit");
+        }
+    });
+}
+
+/// Play, from the window a held start leaves open.
+pub fn play() {
+    HOLD.store(false, Ordering::SeqCst);
+    show(Status::Checking);
+    spawn(autopilot());
+}
+
+/// Verify and Repair: checks every file of the install against the build's
+/// manifests and fetches what is missing or wrong.
+pub fn repair() {
+    spawn(async {
+        let settings = match app().settings.load() {
+            Ok(settings) => settings,
+            Err(error) => return show(Status::Failed(error.to_string())),
+        };
+        let installed = settings
+            .install_path
+            .as_deref()
+            .and_then(|folder| app().records.installed(folder, &WOW_FOREVER).ok().flatten());
+        match (settings.install_path, installed) {
+            (Some(folder), Some(_)) => {
+                let locale = settings.locale.unwrap_or_else(|| default_locale(&forever_locales()));
+                begin_install(folder, locale, Some(Purpose::Repair));
+            }
+            // Nothing installed to repair: the autopilot offers to install.
+            _ => autopilot().await,
+        }
+    });
 }
 
 pub fn sign_in() {
@@ -148,15 +218,23 @@ pub fn sign_out() {
 /// after an interruption: one path, since an update is an install that
 /// finds most of its files in place.
 pub fn start_install(folder: PathBuf, locale: Locale) {
+    begin_install(folder, locale, None);
+}
+
+/// `purpose`: told by the caller for a repair, else worked out from the folder.
+fn begin_install(folder: PathBuf, locale: Locale, purpose: Option<Purpose>) {
     let mut running = INSTALL.lock().expect("never poisoned");
     if running.as_ref().is_some_and(|task| !task.is_finished()) {
         return;
     }
     let run = INSTALL_RUN.fetch_add(1, Ordering::SeqCst) + 1;
-    let update = app().records.installed(&folder, &WOW_FOREVER).ok().flatten().is_some();
-    show_download(run, Download::preparing(update));
+    let purpose = purpose.unwrap_or_else(|| match app().records.installed(&folder, &WOW_FOREVER).ok().flatten() {
+        Some(_) => Purpose::Update,
+        None => Purpose::Install,
+    });
+    show_download(run, Download::preparing(purpose));
     *running = Some(app().runtime.spawn(async move {
-        match run_install(run, &folder, &locale).await {
+        match run_install(run, &folder, &locale, purpose).await {
             Ok(()) => autopilot().await,
             Err(error) => {
                 tracing::error!(%error, "install failed");
@@ -173,7 +251,7 @@ pub fn pause_install() {
     if let Some(task) = INSTALL.lock().expect("never poisoned").take() {
         task.abort();
     }
-    let last = LAST_DOWNLOAD.lock().expect("never poisoned").unwrap_or(Download::preparing(false));
+    let last = LAST_DOWNLOAD.lock().expect("never poisoned").unwrap_or(Download::preparing(Purpose::Install));
     show(Status::Paused(Download { seconds_left: None, ..last }));
 }
 
@@ -189,7 +267,7 @@ pub fn resume_install() {
     });
 }
 
-async fn run_install(run: u64, folder: &Path, locale: &Locale) -> Result<(), String> {
+async fn run_install(run: u64, folder: &Path, locale: &Locale, purpose: Purpose) -> Result<(), String> {
     let mut settings = app().settings.load().map_err(|error| error.to_string())?;
     settings.install_path = Some(folder.to_owned());
     settings.locale = Some(locale.clone());
@@ -198,15 +276,14 @@ async fn run_install(run: u64, folder: &Path, locale: &Locale) -> Result<(), Str
     // the Keychain password, and installing doesn't need it.
     let region = app().session.region().map_err(|error| error.to_string())?;
     let installed = app().records.installed(folder, &WOW_FOREVER).map_err(|error| error.to_string())?;
-    let update = installed.is_some();
-    tracing::info!(folder = %folder.display(), %locale, %region, update, "installing");
+    tracing::info!(folder = %folder.display(), %locale, %region, ?purpose, "installing");
 
     let installer = &app().installer;
     let plan = installer
         .plan(&WOW_FOREVER, region, locale, installed.as_ref(), &|_| {})
         .await
         .map_err(|error| error.to_string())?;
-    let meter = Mutex::new(Meter { update, ..Meter::default() });
+    let meter = Mutex::new(Meter::new(purpose));
     let target = InstallTarget { root: folder, product: &WOW_FOREVER, region, locale };
     installer
         .apply(&plan, target, &|progress| {
@@ -230,14 +307,18 @@ fn show_download(run: u64, download: Download) {
 
 /// Turns the installer's many progress calls into a few window updates with
 /// a speed and time left.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Meter {
     last_shown: Option<(Instant, InstallStage)>,
     samples: VecDeque<(Instant, u64)>,
-    update: bool,
+    purpose: Purpose,
 }
 
 impl Meter {
+    fn new(purpose: Purpose) -> Self {
+        Self { last_shown: None, samples: VecDeque::new(), purpose }
+    }
+
     fn update(&mut self, progress: InstallProgress) -> Option<Download> {
         let now = Instant::now();
         self.samples.push_back((now, progress.done));
@@ -258,8 +339,8 @@ impl Meter {
             (seconds >= 3.0 && speed > 0.0)
                 .then(|| (progress.total.saturating_sub(progress.done) as f64 / speed) as u64)
         });
-        let (stage, done, total, update) = (progress.stage, progress.done, progress.total, self.update);
-        Some(Download { stage, done, total, seconds_left, update })
+        let (stage, done, total, purpose) = (progress.stage, progress.done, progress.total, self.purpose);
+        Some(Download { stage, done, total, seconds_left, purpose })
     }
 }
 
@@ -330,6 +411,10 @@ async fn autopilot() {
                 });
                 return start_install(root, locale.unwrap_or_else(|| default_locale(&forever_locales())));
             }
+            AutopilotStep::Launch if HOLD.load(Ordering::SeqCst) => {
+                let version = installed.map(|build| build.version).unwrap_or_default();
+                return show(Status::Ready(version));
+            }
             AutopilotStep::Launch => {
                 show(Status::Launching);
                 match launch(&root, settings.locale.as_ref()) {
@@ -385,9 +470,17 @@ fn launch(root: &Path, locale: Option<&Locale>) -> Result<(), LaunchError> {
 
 /// The game runs on its own; StoneForm's work is done.
 fn quit() {
-    on_main(|mtm| {
-        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
-        app.terminate(None);
+    spawn(async {
+        // A self-update found at launch gets a moment to download: Sparkle
+        // installs it when StoneForm quits, so quitting first would lose it.
+        let deadline = Instant::now() + SELF_UPDATE_GRACE;
+        while !crate::updater::settled() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        on_main(|mtm| {
+            let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+            app.terminate(None);
+        });
     });
 }
 

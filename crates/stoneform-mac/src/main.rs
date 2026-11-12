@@ -7,7 +7,11 @@ mod app;
 mod login;
 mod main_thread;
 mod ui;
+mod updater;
 mod volume;
+
+use std::io::IsTerminal;
+use std::sync::Mutex;
 
 use objc2::MainThreadMarker;
 use objc2_foundation::NSLocale;
@@ -15,6 +19,7 @@ use stoneform_adapter_blizzard::{BlizzardHttp, HttpContentDelivery, HttpVersionS
 use stoneform_adapter_casc::CascGameStorage;
 use stoneform_adapter_disk::{DiskInstallRecords, DiskLooseFiles, TomlSettingsStore};
 use stoneform_adapter_macos::{KeychainSecretStore, MacGameProcess, PrefsTokenHandoff};
+use stoneform_app::ports::SettingsStore;
 use stoneform_app::{Installer, Launcher, Session};
 use stoneform_domain::Region;
 use tracing_subscriber::EnvFilter;
@@ -23,9 +28,7 @@ use crate::app::App;
 use crate::login::WebKitLoginFlow;
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .init();
+    init_logging();
     let mtm = MainThreadMarker::new().expect("StoneForm starts on the main thread");
 
     let settings = match TomlSettingsStore::new() {
@@ -50,12 +53,34 @@ fn main() {
         std::process::exit(1);
     };
     let http = BlizzardHttp::new().expect("the HTTP client starts");
+    http.throttle().set_limit(settings.load().ok().and_then(|saved| saved.download_limit));
+    let throttle = http.throttle().clone();
     let installer = Installer::new(HttpVersionSource::new(http.clone()), HttpContentDelivery::new(http, cache))
         .with_disk(CascGameStorage::with_free_space(volume::available_bytes), DiskLooseFiles, DiskInstallRecords);
     let launcher = Launcher::new(KeychainSecretStore::new(), PrefsTokenHandoff::new(), MacGameProcess);
-    app::install(App { session, settings, installer, launcher, records: DiskInstallRecords, runtime });
+    app::install(App { session, settings, installer, launcher, records: DiskInstallRecords, throttle, runtime });
 
     ui::run(mtm);
+}
+
+/// To the terminal when there is one; else, as an app opened from Finder,
+/// to `~/Library/Logs/StoneForm/StoneForm.log`, so problems leave a trace.
+fn init_logging() {
+    let filter = || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let log_file = (!std::io::stderr().is_terminal())
+        .then(directories::BaseDirs::new)
+        .flatten()
+        .map(|dirs| dirs.home_dir().join("Library/Logs/StoneForm"))
+        .and_then(|dir| {
+            std::fs::create_dir_all(&dir).ok()?;
+            std::fs::OpenOptions::new().create(true).append(true).open(dir.join("StoneForm.log")).ok()
+        });
+    match log_file {
+        Some(file) => {
+            tracing_subscriber::fmt().with_env_filter(filter()).with_ansi(false).with_writer(Mutex::new(file)).init();
+        }
+        None => tracing_subscriber::fmt().with_env_filter(filter()).init(),
+    }
 }
 
 /// The first guess at the play region, from the Mac's country setting.

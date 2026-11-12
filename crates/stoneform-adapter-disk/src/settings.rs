@@ -23,6 +23,9 @@ struct SettingsFile {
     install_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     locale: Option<String>,
+    /// Bytes per second.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    download_limit: Option<u64>,
 }
 
 impl TomlSettingsStore {
@@ -59,7 +62,7 @@ impl SettingsStore for TomlSettingsStore {
         let locale = file.locale.and_then(|value| {
             Locale::parse(&value).inspect_err(|error| tracing::warn!(%error, "ignoring the saved language")).ok()
         });
-        Ok(Settings { region, account, install_path: file.install_path, locale })
+        Ok(Settings { region, account, install_path: file.install_path, locale, download_limit: file.download_limit })
     }
 
     fn save(&self, settings: &Settings) -> Result<(), SettingsError> {
@@ -68,6 +71,7 @@ impl SettingsStore for TomlSettingsStore {
             account: settings.account.as_ref().map(|account| account.as_str().to_owned()),
             install_path: settings.install_path.clone(),
             locale: settings.locale.as_ref().map(|locale| locale.as_str().to_owned()),
+            download_limit: settings.download_limit,
         };
         let text = toml::to_string_pretty(&file).map_err(|error| SettingsError(error.into()))?;
         write_atomically(&self.path, text.as_bytes()).map_err(|error| SettingsError(error.into()))
@@ -109,6 +113,7 @@ mod tests {
             account: Some(AccountId::parse("42").unwrap()),
             install_path: Some(PathBuf::from("/Applications/World of Warcraft")),
             locale: Some(Locale::parse("deDE").unwrap()),
+            download_limit: Some(10_000_000),
         };
 
         store.save(&settings).unwrap();
@@ -117,7 +122,8 @@ mod tests {
         let text = fs::read_to_string(store.path()).unwrap();
         assert_eq!(
             text,
-            "region = \"eu\"\naccount = \"42\"\ninstall_path = \"/Applications/World of Warcraft\"\nlocale = \"deDE\"\n"
+            "region = \"eu\"\naccount = \"42\"\ninstall_path = \"/Applications/World of Warcraft\"\n\
+             locale = \"deDE\"\ndownload_limit = 10000000\n"
         );
     }
 

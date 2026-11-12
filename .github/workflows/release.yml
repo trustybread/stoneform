@@ -1,0 +1,44 @@
+name: Release
+
+# Pushing a tag like v0.2.0 builds StoneForm.app, signs the update for
+# Sparkle, and publishes StoneForm-0.2.0.zip and appcast.xml as a GitHub
+# release. Installed copies find it through the "latest" appcast.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: macos-15
+    # The secrets live in this environment; give it required reviewers so a
+    # release waits for your approval before anything can read them.
+    environment: release
+    permissions:
+      contents: write # create the release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the build number is the commit count
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Test
+        run: cargo test --workspace --locked
+      # Developer ID signing and notarization come here once enrolled: import
+      # the certificate into a temporary keychain, set SIGN_IDENTITY for the
+      # build, then notarize and staple the app before zipping.
+      - name: Build and sign the update
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: VERSION="${GITHUB_REF_NAME#v}" scripts/release.sh
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/StoneForm-*.zip dist/appcast.xml \
+            --title "StoneForm ${GITHUB_REF_NAME#v}" --generate-notes

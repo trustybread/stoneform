@@ -8,16 +8,17 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSButton, NSFont,
-    NSLineBreakMode, NSMenu, NSMenuItem, NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSProgressIndicator,
-    NSProgressIndicatorStyle, NSTextAlignment, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSButton,
+    NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSEventModifierFlags, NSFont, NSLineBreakMode, NSMenu,
+    NSMenuItem, NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSProgressIndicator, NSProgressIndicatorStyle,
+    NSTextAlignment, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
 use stoneform_domain::Locale;
 
 use stoneform_app::InstallStage;
 
-use crate::app::{self, Download, InstallChoice, Status};
+use crate::app::{self, Download, InstallChoice, Purpose, Status};
 use crate::volume::{available_bytes, format_bytes};
 
 const WIDTH: f64 = 480.0;
@@ -42,6 +43,8 @@ struct Ui {
 
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
+    /// The Download Speed items, to move the check mark.
+    static SPEED_ITEMS: RefCell<Vec<Retained<NSMenuItem>>> = const { RefCell::new(Vec::new()) };
 }
 
 define_class!(
@@ -57,7 +60,17 @@ define_class!(
         fn did_finish_launching(&self, _notification: &NSNotification) {
             tracing::debug!("launched; opening the window");
             build_window(self.mtm(), self);
-            app::start();
+            crate::updater::start(self.mtm());
+            // scripts/test-self-update.sh runs throwaway copies that must not
+            // sign in, install or start the game: only Sparkle runs then.
+            if std::env::var_os("STONEFORM_SELF_UPDATE_TEST").is_some() {
+                tracing::info!("self-update test: the autopilot stays off");
+                return;
+            }
+            // ⌥ held while opening: stop before launching, so the menus
+            // (Verify and Repair, Sign In Again, …) are within reach.
+            let hold = NSEvent::modifierFlags_class().contains(NSEventModifierFlags::Option);
+            app::start(hold);
         }
 
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
@@ -75,7 +88,7 @@ define_class!(
             };
             match shown {
                 Status::SignedOut => app::sign_in(),
-                Status::Failed(_) => app::start(),
+                Status::Failed(_) => app::start(false),
                 Status::ChooseInstall(_) => {
                     if let Some((folder, locale)) = choice {
                         app::start_install(folder, locale);
@@ -83,6 +96,7 @@ define_class!(
                 }
                 Status::Installing(_) => app::pause_install(),
                 Status::Paused(_) => app::resume_install(),
+                Status::Ready(_) => app::play(),
                 Status::Checking | Status::SigningIn | Status::WaitingForBattleNet | Status::Launching => {}
             }
         }
@@ -101,6 +115,20 @@ define_class!(
 
         /// For when the game rejects the saved sign-in, which StoneForm
         /// cannot see from outside: a fresh token for the next launch.
+        #[unsafe(method(setDownloadSpeed:))]
+        fn set_download_speed(&self, sender: Option<&AnyObject>) {
+            let Some(item) = sender.and_then(|sender| sender.downcast_ref::<NSMenuItem>()) else { return };
+            let megabytes = u64::try_from(item.tag()).unwrap_or(0);
+            let limit = (megabytes > 0).then(|| megabytes * MEGABYTE);
+            app::set_download_limit(limit);
+            mark_speed(limit);
+        }
+
+        #[unsafe(method(verifyAndRepair:))]
+        fn verify_and_repair(&self, _sender: Option<&AnyObject>) {
+            app::repair();
+        }
+
         #[unsafe(method(signInAgain:))]
         fn sign_in_again(&self, _sender: Option<&AnyObject>) {
             app::sign_in();
@@ -163,6 +191,43 @@ impl Ui {
     }
 }
 
+/// "Download Speed ▸ Unlimited, 50 MB/s, …" with a check mark on the current limit.
+fn speed_menu(mtm: MainThreadMarker) -> Retained<NSMenuItem> {
+    let submenu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Download Speed"));
+    let items: Vec<Retained<NSMenuItem>> = SPEEDS
+        .iter()
+        .map(|&(megabytes, title)| {
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str(title),
+                    Some(sel!(setDownloadSpeed:)),
+                    &NSString::new(),
+                )
+            };
+            item.setTag(megabytes);
+            submenu.addItem(&item);
+            item
+        })
+        .collect();
+    SPEED_ITEMS.with(|speed| *speed.borrow_mut() = items);
+    mark_speed(app::download_limit());
+    let holder = NSMenuItem::new(mtm);
+    holder.setTitle(&NSString::from_str("Download Speed"));
+    holder.setSubmenu(Some(&submenu));
+    holder
+}
+
+fn mark_speed(limit: Option<u64>) {
+    let chosen = limit.map_or(0, |bytes| (bytes / MEGABYTE) as isize);
+    SPEED_ITEMS.with(|items| {
+        for item in items.borrow().iter() {
+            let on = item.tag() == chosen;
+            item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+        }
+    });
+}
+
 /// Runs the app until it quits.
 pub fn run(mtm: MainThreadMarker) {
     let app = NSApplication::sharedApplication(mtm);
@@ -208,6 +273,7 @@ pub fn show(_mtm: MainThreadMarker, status: Status) {
                 ("Quit Battle.net to continue. StoneForm carries on when it has closed.".to_owned(), None)
             }
             Status::Launching => ("Starting WoW: Forever…".to_owned(), None),
+            Status::Ready(version) => (format!("WoW: Forever {version} is ready."), Some("Play")),
             Status::Failed(message) => (format!("Something went wrong: {message}"), Some("Try Again")),
         };
         ui.status.setStringValue(&NSString::from_str(&text));
@@ -225,10 +291,13 @@ pub fn show(_mtm: MainThreadMarker, status: Status) {
 }
 
 fn download_text(download: &Download) -> String {
-    let verb = if download.update { "Updating" } else { "Downloading" };
+    let (verb, preparing) = match download.purpose {
+        Purpose::Install => ("Downloading", "Preparing the download…"),
+        Purpose::Update => ("Updating", "Preparing the update…"),
+        Purpose::Repair => ("Verifying", "Checking the game's files…"),
+    };
     match download.stage {
-        InstallStage::Preparing if download.update => "Preparing the update…".to_owned(),
-        InstallStage::Preparing => "Preparing the download…".to_owned(),
+        InstallStage::Preparing => preparing.to_owned(),
         InstallStage::Finishing => "Finishing…".to_owned(),
         InstallStage::Downloading => {
             let mut text = format!("{verb} · {} of {}", format_bytes(download.done), format_bytes(download.total));
@@ -383,19 +452,34 @@ fn build_window(mtm: MainThreadMarker, delegate: &AppDelegate) {
 enum Entry {
     Item(&'static str, Sel, &'static str),
     Separator,
+    /// The Download Speed submenu.
+    Speed,
 }
+
+/// The Download Speed choices, in MB/s; 0 is no limit.
+const SPEEDS: [(isize, &str); 6] =
+    [(0, "Unlimited"), (50, "50 MB/s"), (20, "20 MB/s"), (10, "10 MB/s"), (5, "5 MB/s"), (1, "1 MB/s")];
+const MEGABYTE: u64 = 1_000_000;
 
 /// The app, Edit and Window menus. Edit matters: without it, Cmd-C/V/A do
 /// nothing in the sign-in page's fields, so password managers can't paste.
 /// Items without a target go up the responder chain, which ends at the app
 /// delegate.
 fn main_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
-    use Entry::{Item, Separator};
+    use Entry::{Item, Separator, Speed};
     let bar = NSMenu::new(mtm);
     let menus = [
         (
             "StoneForm",
-            vec![Item("Sign Out", sel!(signOut:), ""), Separator, Item("Quit StoneForm", sel!(terminate:), "q")],
+            vec![
+                Item("Verify and Repair", sel!(verifyAndRepair:), ""),
+                Speed,
+                Separator,
+                Item("Sign In Again", sel!(signInAgain:), ""),
+                Item("Sign Out", sel!(signOut:), ""),
+                Separator,
+                Item("Quit StoneForm", sel!(terminate:), "q"),
+            ],
         ),
         (
             "Edit",
@@ -425,6 +509,7 @@ fn main_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
                     )
                 },
                 Separator => NSMenuItem::separatorItem(mtm),
+                Speed => speed_menu(mtm),
             };
             menu.addItem(&item);
         }

@@ -9,10 +9,12 @@ mod cdn;
 mod client;
 mod error;
 mod retry;
+mod throttle;
 mod versions;
 
 pub use cdn::HttpContentDelivery;
 pub use client::{BlizzardHttp, VersionTable};
 pub use error::HttpError;
 pub use retry::Retry;
+pub use throttle::Throttle;
 pub use versions::HttpVersionSource;

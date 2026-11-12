@@ -3,13 +3,13 @@ use std::ops::RangeInclusive;
 use std::path::Path;
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use reqwest::StatusCode;
 use reqwest::header::{CONTENT_RANGE, RANGE};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
-use crate::{HttpError, Retry};
+use crate::{HttpError, Retry, Throttle};
 
 /// The two tables the version service publishes per product.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +35,7 @@ pub struct BlizzardHttp {
     http: reqwest::Client,
     retry: Retry,
     version_base: Option<String>,
+    throttle: Throttle,
 }
 
 impl BlizzardHttp {
@@ -45,7 +46,12 @@ impl BlizzardHttp {
             // Per read, not per request: a large download may take hours.
             .read_timeout(Duration::from_secs(60))
             .build()?;
-        Ok(Self { http, retry: Retry::default(), version_base: None })
+        Ok(Self { http, retry: Retry::default(), version_base: None, throttle: Throttle::default() })
+    }
+
+    /// The download speed limit this client and its clones share.
+    pub fn throttle(&self) -> &Throttle {
+        &self.throttle
     }
 
     pub fn with_retry(mut self, retry: Retry) -> Self {
@@ -93,7 +99,7 @@ impl BlizzardHttp {
                 if let Some(range) = &range {
                     check_content_range(&response, &url, *range.start(), *range.end())?;
                 }
-                let body = response.bytes().await.map_err(|source| HttpError::Network { url: url.clone(), source })?;
+                let body = self.read_body(response, &url).await?;
                 if let Some(range) = &range {
                     let expected = range.end() - range.start() + 1;
                     if body.len() as u64 != expected {
@@ -154,6 +160,7 @@ impl BlizzardHttp {
             while let Some(chunk) =
                 response.chunk().await.map_err(|source| HttpError::Network { url: url.clone(), source })?
             {
+                self.throttle.take(chunk.len()).await;
                 file.write_all(&chunk).await.map_err(io_error)?;
                 written += chunk.len() as u64;
                 progress(written);
@@ -162,6 +169,18 @@ impl BlizzardHttp {
             Ok(written)
         })
         .await
+    }
+
+    /// The whole body, read in chunks so the speed limit can pace it.
+    async fn read_body(&self, mut response: reqwest::Response, url: &str) -> Result<Bytes, HttpError> {
+        let mut body = BytesMut::with_capacity(usize::try_from(response.content_length().unwrap_or(0)).unwrap_or(0));
+        while let Some(chunk) =
+            response.chunk().await.map_err(|source| HttpError::Network { url: url.to_owned(), source })?
+        {
+            self.throttle.take(chunk.len()).await;
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body.freeze())
     }
 
     async fn send(&self, url: &str, range: Option<(u64, Option<u64>)>) -> Result<reqwest::Response, HttpError> {

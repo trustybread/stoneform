@@ -58,6 +58,8 @@ pub struct Settings {
     pub install_path: Option<PathBuf>,
     /// The game's language, chosen at install.
     pub locale: Option<Locale>,
+    /// Download speed limit in bytes per second; `None` for no limit.
+    pub download_limit: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
