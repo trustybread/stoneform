@@ -57,8 +57,13 @@ waiting for Blizzard: switch a folder to an older build, then update it.
 ```sh
 scripts/bundle.sh                     # target/release/bundle/StoneForm.app, no update feed
 scripts/test-self-update.sh           # an old copy updates itself from a local feed
+scripts/make-icon.sh                  # macos/AppIcon.icns from the SVGs next to it
 git tag v0.2.0 && git push origin v0.2.0   # GitHub Actions builds and publishes
 ```
+
+The app icon's source is `macos/AppIcon.svg`, plus `AppIcon-small.svg`, a
+simpler version for 16 px. After changing either one, run `make-icon.sh` and
+commit the `.icns`.
 
 The release workflow builds `StoneForm-<version>.zip`, signs it for Sparkle and
 publishes it with `appcast.xml` as a GitHub release. Installed copies read

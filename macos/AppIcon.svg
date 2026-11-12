@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- StoneForm app icon, "Monolith Rune". macOS grid: an 824 px rounded
+       square on a 1024 px canvas. scripts/make-icon.sh turns it into
+       AppIcon.icns. -->
+  <rect x="100" y="114" width="824" height="824" rx="185" fill="#000000" opacity="0.10"/>
+  <rect x="100" y="106" width="824" height="824" rx="185" fill="#000000" opacity="0.12"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#1F2C34"/>
+  <circle cx="250" cy="250" r="5" fill="#344651"/>
+  <circle cx="760" cy="214" r="6" fill="#344651"/>
+  <circle cx="804" cy="372" r="4" fill="#344651"/>
+  <circle cx="226" cy="430" r="4" fill="#344651"/>
+  <ellipse cx="500" cy="812" rx="214" ry="26" fill="#16212A"/>
+  <polygon points="400,300 352,276 344,780 392,804" fill="#959CA5"/>
+  <polygon points="400,300 624,280 576,256 352,276" fill="#BCC2C9"/>
+  <polygon points="400,300 624,280 640,804 392,804" fill="#5E6570"/>
+  <polyline points="556,372 470,452 560,524 474,604" fill="none" stroke="#6EE7D2" opacity="0.25"
+            stroke-width="76" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="556,372 470,452 560,524 474,604" fill="none" stroke="#6EE7D2"
+            stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

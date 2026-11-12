@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- AppIcon.svg simplified for 16 px: no stars or halo, a bolder rune. -->
+  <rect x="100" y="106" width="824" height="824" rx="185" fill="#000000" opacity="0.18"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#1F2C34"/>
+  <polygon points="400,300 352,276 344,780 392,804" fill="#959CA5"/>
+  <polygon points="400,300 624,280 576,256 352,276" fill="#BCC2C9"/>
+  <polygon points="400,300 624,280 640,804 392,804" fill="#5E6570"/>
+  <polyline points="560,360 464,452 564,532 468,624" fill="none" stroke="#6EE7D2"
+            stroke-width="96" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
