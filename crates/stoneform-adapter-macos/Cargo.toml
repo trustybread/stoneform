@@ -10,8 +10,16 @@ publish.workspace = true
 stoneform-domain.workspace = true
 stoneform-app.workspace = true
 security-framework.workspace = true
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
+libc.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

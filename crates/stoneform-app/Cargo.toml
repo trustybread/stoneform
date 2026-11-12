@@ -8,6 +8,9 @@ publish.workspace = true
 
 [dependencies]
 stoneform-domain.workspace = true
+stoneform-tact.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

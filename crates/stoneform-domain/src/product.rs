@@ -29,6 +29,8 @@ pub struct Product {
     pub app_path: &'static str,
     /// Arguments before `-uid <uid>`.
     pub launch_arguments: &'static [&'static str],
+    /// The game languages it can be installed in; the product config has the live list.
+    pub locales: &'static [&'static str],
 }
 
 /// WoW: Forever, as Waypoint's catalog tests record it (upstream e566728).
@@ -41,4 +43,5 @@ pub const WOW_FOREVER: Product = Product {
     flavor_folder: "_forever_",
     app_path: "_forever_/World of Warcraft.app",
     launch_arguments: &["-launcherlogin"],
+    locales: &["enUS", "deDE", "esES", "esMX", "frFR", "ruRU", "koKR", "ptBR", "zhTW", "zhCN"],
 };

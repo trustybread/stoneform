@@ -1,0 +1,26 @@
+[package]
+name = "stoneform-dev"
+description = "Developer CLI on StoneForm's use cases; never shipped in the app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "stoneform-dev"
+path = "src/main.rs"
+
+[dependencies]
+stoneform-app.workspace = true
+stoneform-domain.workspace = true
+stoneform-tact.workspace = true
+stoneform-adapter-blizzard.workspace = true
+stoneform-adapter-casc.workspace = true
+stoneform-adapter-disk.workspace = true
+directories.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

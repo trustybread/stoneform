@@ -14,6 +14,10 @@ stoneform-domain = { path = "crates/stoneform-domain" }
 stoneform-app = { path = "crates/stoneform-app" }
 stoneform-adapter-macos = { path = "crates/stoneform-adapter-macos" }
 stoneform-adapter-disk = { path = "crates/stoneform-adapter-disk" }
+stoneform-tact = { path = "crates/stoneform-tact" }
+stoneform-adapter-blizzard = { path = "crates/stoneform-adapter-blizzard" }
+stoneform-adapter-casc = { path = "crates/stoneform-adapter-casc" }
+stoneform-dev = { path = "crates/stoneform-dev" }
 
 # Shared
 thiserror = "2.0.21"
@@ -26,6 +30,15 @@ serde_json = "1"
 toml = "1.2.1"
 directories = "6.0.0"
 tempfile = "3"
+wiremock = "0.6.5"
+
+# Formats and network
+flate2 = "1.1.11"
+md-5 = "0.11.0"
+bytes = "1.12.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
+memmap2 = "0.9.12"
+futures-util = { version = "0.3.34", default-features = false, features = ["std", "async-await-macro"] }
 
 # macOS
 security-framework = "3.7.0"
@@ -35,6 +48,7 @@ objc2-app-kit = "0.3.2"
 objc2-web-kit = "0.3.2"
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
+libc = "0.2.191"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

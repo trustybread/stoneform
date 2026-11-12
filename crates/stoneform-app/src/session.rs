@@ -42,16 +42,20 @@ impl<L: LoginFlow, S: SecretStore, C: SettingsStore> Session<L, S, C> {
         Self { login, secrets, settings, default_region }
     }
 
-    /// The signed-in account, if its token is in the secret store. Never shows
-    /// anything, so it is safe to call on every start.
+    /// The signed-in account, if its token is in the secret store. Never reads
+    /// the token itself, so it is quiet and safe to call on every start.
     pub fn current(&self) -> Result<Option<SignedIn>, AppError> {
         let settings = self.settings.load()?;
         let Some(account) = settings.account else { return Ok(None) };
-        let signed_in = self
-            .secrets
-            .token(&account, CODENAME)?
-            .map(|_| SignedIn { account, region: settings.region.unwrap_or(self.default_region) });
+        let region = settings.region.unwrap_or(self.default_region);
+        let signed_in = self.secrets.has_token(&account, CODENAME)?.then_some(SignedIn { account, region });
         Ok(signed_in)
+    }
+
+    /// Where the user plays: the region they signed in with, else the guess
+    /// from the Mac's settings. Touches no secret.
+    pub fn region(&self) -> Result<Region, AppError> {
+        Ok(self.settings.load()?.region.unwrap_or(self.default_region))
     }
 
     /// Shows the web login, then keeps the token and makes its account the
@@ -132,6 +136,10 @@ mod tests {
     struct MemorySecrets(Mutex<HashMap<(AccountId, GameCodename), LaunchToken>>);
 
     impl SecretStore for MemorySecrets {
+        fn has_token(&self, account: &AccountId, codename: GameCodename) -> Result<bool, SecretError> {
+            Ok(self.0.lock().unwrap().contains_key(&(account.clone(), codename)))
+        }
+
         fn token(&self, account: &AccountId, codename: GameCodename) -> Result<Option<LaunchToken>, SecretError> {
             Ok(self.0.lock().unwrap().get(&(account.clone(), codename)).cloned())
         }
@@ -189,7 +197,7 @@ mod tests {
     #[tokio::test]
     async fn the_saved_region_wins_over_the_default() {
         let session = session(FakeLogin::answering(vec![Ok(token("42"))]));
-        session.settings.save(&Settings { region: Some(Region::Kr), account: None }).unwrap();
+        session.settings.save(&Settings { region: Some(Region::Kr), ..Settings::default() }).unwrap();
 
         let signed_in = session.sign_in().await.unwrap();
 
@@ -240,6 +248,14 @@ mod tests {
         assert_eq!(session.settings.load().unwrap().account, None);
         assert_eq!(session.settings.load().unwrap().region, Some(Region::Eu));
         assert_eq!(*session.login.forgotten.lock().unwrap(), vec![account("42")]);
+    }
+
+    #[tokio::test]
+    async fn the_region_needs_no_sign_in() {
+        let session = session(FakeLogin::default());
+        assert_eq!(session.region().unwrap(), Region::Eu);
+        session.settings.save(&Settings { region: Some(Region::Us), ..Settings::default() }).unwrap();
+        assert_eq!(session.region().unwrap(), Region::Us);
     }
 
     #[tokio::test]

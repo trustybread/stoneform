@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
 use security_framework::passwords::{delete_generic_password, get_generic_password, set_generic_password};
 use stoneform_app::ports::{SecretError, SecretStore};
 use stoneform_domain::{AccountId, GameCodename, LaunchToken};
@@ -47,6 +48,25 @@ impl Default for KeychainSecretStore {
 }
 
 impl SecretStore for KeychainSecretStore {
+    /// Asks only for the item's attributes, never its data: macOS prompts
+    /// before handing out a secret, not before saying it exists. v1 keeps WoW
+    /// tokens only, so the account's item standing there means its token does.
+    fn has_token(&self, account: &AccountId, _codename: GameCodename) -> Result<bool, SecretError> {
+        let found = ItemSearchOptions::new()
+            .class(ItemClass::generic_password())
+            .service(&self.service)
+            .account(account.as_str())
+            .load_attributes(true)
+            .load_data(false)
+            .limit(Limit::Max(1))
+            .search();
+        match found {
+            Ok(items) => Ok(!items.is_empty()),
+            Err(error) if error.code() == ITEM_NOT_FOUND => Ok(false),
+            Err(error) => Err(SecretError(error.into())),
+        }
+    }
+
     fn token(&self, account: &AccountId, codename: GameCodename) -> Result<Option<LaunchToken>, SecretError> {
         let tokens = self.read(account)?;
         let Some(value) = tokens.get(codename.as_str()) else { return Ok(None) };
@@ -90,9 +110,12 @@ mod tests {
         store.forget(&account).unwrap();
 
         assert_eq!(store.token(&account, GameCodename::WOW).unwrap(), None);
+        assert!(!store.has_token(&account, GameCodename::WOW).unwrap());
         store.save(&token, GameCodename::WOW).unwrap();
+        assert!(store.has_token(&account, GameCodename::WOW).unwrap());
         assert_eq!(store.token(&account, GameCodename::WOW).unwrap(), Some(token));
         store.forget(&account).unwrap();
+        assert!(!store.has_token(&account, GameCodename::WOW).unwrap());
         assert_eq!(store.token(&account, GameCodename::WOW).unwrap(), None);
         store.forget(&account).unwrap();
     }

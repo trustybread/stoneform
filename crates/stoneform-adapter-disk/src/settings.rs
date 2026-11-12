@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use stoneform_app::ports::{Settings, SettingsError, SettingsStore};
-use stoneform_domain::{AccountId, Region};
+use stoneform_domain::{AccountId, Locale, Region};
 
 /// Settings in `~/Library/Application Support/StoneForm/settings.toml`.
 #[derive(Debug, Clone)]
@@ -19,6 +19,10 @@ struct SettingsFile {
     region: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    install_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    locale: Option<String>,
 }
 
 impl TomlSettingsStore {
@@ -52,13 +56,18 @@ impl SettingsStore for TomlSettingsStore {
         let account = file.account.and_then(|value| {
             AccountId::parse(&value).inspect_err(|error| tracing::warn!(%error, "ignoring the saved account")).ok()
         });
-        Ok(Settings { region, account })
+        let locale = file.locale.and_then(|value| {
+            Locale::parse(&value).inspect_err(|error| tracing::warn!(%error, "ignoring the saved language")).ok()
+        });
+        Ok(Settings { region, account, install_path: file.install_path, locale })
     }
 
     fn save(&self, settings: &Settings) -> Result<(), SettingsError> {
         let file = SettingsFile {
             region: settings.region.map(|region| region.as_str().to_owned()),
             account: settings.account.as_ref().map(|account| account.as_str().to_owned()),
+            install_path: settings.install_path.clone(),
+            locale: settings.locale.as_ref().map(|locale| locale.as_str().to_owned()),
         };
         let text = toml::to_string_pretty(&file).map_err(|error| SettingsError(error.into()))?;
         write_atomically(&self.path, text.as_bytes()).map_err(|error| SettingsError(error.into()))
@@ -95,19 +104,27 @@ mod tests {
     #[test]
     fn round_trips_settings() {
         let (_dir, store) = store();
-        let settings = Settings { region: Some(Region::Eu), account: Some(AccountId::parse("42").unwrap()) };
+        let settings = Settings {
+            region: Some(Region::Eu),
+            account: Some(AccountId::parse("42").unwrap()),
+            install_path: Some(PathBuf::from("/Applications/World of Warcraft")),
+            locale: Some(Locale::parse("deDE").unwrap()),
+        };
 
         store.save(&settings).unwrap();
 
         assert_eq!(store.load().unwrap(), settings);
         let text = fs::read_to_string(store.path()).unwrap();
-        assert_eq!(text, "region = \"eu\"\naccount = \"42\"\n");
+        assert_eq!(
+            text,
+            "region = \"eu\"\naccount = \"42\"\ninstall_path = \"/Applications/World of Warcraft\"\nlocale = \"deDE\"\n"
+        );
     }
 
     #[test]
     fn signed_out_settings_omit_the_account() {
         let (_dir, store) = store();
-        store.save(&Settings { region: Some(Region::Us), account: None }).unwrap();
+        store.save(&Settings { region: Some(Region::Us), ..Settings::default() }).unwrap();
         assert_eq!(fs::read_to_string(store.path()).unwrap(), "region = \"us\"\n");
     }
 

@@ -3,7 +3,11 @@
 //! The ports are traits this crate owns; adapters implement them. Nothing in
 //! here names an adapter, touches the network, the disk or a macOS API.
 
+pub mod install;
+mod launch;
 pub mod ports;
 mod session;
 
+pub use install::{InstallError, InstallPlan, InstallProgress, InstallStage, InstallTarget, Installer, PlanStep};
+pub use launch::{LaunchError, LaunchTarget, Launcher};
 pub use session::{AppError, Session, SignedIn};

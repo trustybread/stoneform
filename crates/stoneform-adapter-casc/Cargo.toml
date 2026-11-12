@@ -1,0 +1,28 @@
+[package]
+name = "stoneform-adapter-casc"
+description = "The game's local CASC storage on disk: append blobs, journal, index files, shmem"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+stoneform-tact.workspace = true
+stoneform-app.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# flock on the storage folder, statvfs for free space.
+rustix = { version = "1.1.6", features = ["fs"] }
+# The random base key of a new storage's segment headers.
+getrandom = "0.4.3"
+# Archive indexes are read in place when building the archive groups (WoW
+# has over a thousand of them, hundreds of megabytes together).
+memmap2 = "0.9.11"
+
+[dev-dependencies]
+tempfile.workspace = true
+# setrlimit and SIGXFSZ, to make a write fail like a full disk.
+libc = "0.2.191"
+
+[lints]
+workspace = true

@@ -15,10 +15,13 @@ stoneform-domain.workspace = true
 stoneform-app.workspace = true
 stoneform-adapter-macos.workspace = true
 stoneform-adapter-disk.workspace = true
+stoneform-adapter-blizzard.workspace = true
+stoneform-adapter-casc.workspace = true
+directories.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "net"] }
 objc2.workspace = true
 objc2-foundation.workspace = true
 objc2-app-kit.workspace = true
