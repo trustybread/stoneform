@@ -45,6 +45,16 @@ if [[ -n "${SIGNING_CERTIFICATE:-}" ]]; then
     trap 'security delete-keychain "$keychain" 2>/dev/null || true; rm -rf "$keychain_dir"' EXIT
     security create-keychain -p "$keychain_password" "$keychain"
     security set-keychain-settings "$keychain" # no auto-lock while signing
+    security unlock-keychain -p "$keychain_password" "$keychain"
+    # codesign builds the certificate chain only from keychains on the search
+    # list, so this one joins it until the trap deletes it (which also takes
+    # it off the list). Without this, GitHub's macOS 15 runners fail with
+    # "The specified item could not be found in the keychain".
+    keychains=()
+    while IFS= read -r line; do
+        keychains+=("$(sed -E 's/^[[:space:]]*"(.*)"$/\1/' <<< "$line")")
+    done < <(security list-keychains -d user)
+    security list-keychains -d user -s "$keychain" ${keychains[@]+"${keychains[@]}"}
     printf '%s' "$SIGNING_CERTIFICATE" | base64 --decode > "$keychain_dir/signing.p12"
     security import "$keychain_dir/signing.p12" -k "$keychain" -T /usr/bin/codesign \
         -P "${SIGNING_CERTIFICATE_PASSWORD:?SIGNING_CERTIFICATE needs SIGNING_CERTIFICATE_PASSWORD}" >/dev/null

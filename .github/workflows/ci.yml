@@ -32,3 +32,13 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+      # Signs the app the way a release does, with a throwaway certificate, so
+      # signing problems show up here rather than in the release job.
+      - name: Bundle and sign
+        run: |
+          cert="$(mktemp -d)"
+          CERT_NAME="StoneForm CI" scripts/make-signing-cert.sh "$cert"
+          SIGNING_CERTIFICATE="$(base64 -i "$cert/stoneform-signing.p12")" \
+          SIGNING_CERTIFICATE_PASSWORD="$(cat "$cert/stoneform-signing-password.txt")" \
+            scripts/bundle.sh
+          rm -rf "$cert"
