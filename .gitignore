@@ -1,5 +1,6 @@
 /target
 .DS_Store
 /dist
-# make-signing-cert.sh output: secrets, never commit them
+# Secrets from the release setup (see README): never commit them
 stoneform-signing*
+sparkle-private-key
