@@ -7,7 +7,11 @@
 #   SPARKLE_PRIVATE_KEY  the EdDSA private key, as `generate_keys -x` exports
 #                        it; without it the key comes from the login keychain
 #                        (account "stoneform"), for releases made on a Mac
-#   SIGN_IDENTITY        codesign identity (default: ad-hoc "-")
+#   SIGNING_CERTIFICATE, SIGNING_CERTIFICATE_PASSWORD
+#                        StoneForm's signing certificate (see bundle.sh);
+#                        or SIGN_IDENTITY, an identity from your keychains.
+#                        One is required: SIGN_IDENTITY=- makes an ad-hoc
+#                        dry run, which installed copies must never get.
 #
 # The feed is https://github.com/<REPOSITORY>/releases/latest/download/appcast.xml:
 # GitHub redirects it to the newest release's appcast.xml, so it never changes.
@@ -18,6 +22,10 @@ version="${VERSION:?set VERSION, e.g. 0.2.0}"
 repository="${REPOSITORY:?set REPOSITORY, e.g. trustybread/stoneform}"
 feed="https://github.com/${repository}/releases/latest/download/appcast.xml"
 downloads="https://github.com/${repository}/releases/download/v${version}/"
+if [[ -z "${SIGNING_CERTIFICATE:-}${SIGN_IDENTITY:-}" ]]; then
+    echo "Set SIGNING_CERTIFICATE (or SIGN_IDENTITY, - for an ad-hoc dry run)" >&2
+    exit 1
+fi
 
 rm -rf dist
 mkdir -p dist

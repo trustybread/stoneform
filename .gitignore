@@ -1,3 +1,5 @@
 /target
 .DS_Store
 /dist
+# make-signing-cert.sh output: secrets, never commit them
+stoneform-signing*

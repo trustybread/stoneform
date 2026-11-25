@@ -28,12 +28,13 @@ jobs:
           rustup default stable
       - name: Test
         run: cargo test --workspace --locked
-      # Developer ID signing and notarization come here once enrolled: import
-      # the certificate into a temporary keychain, set SIGN_IDENTITY for the
-      # build, then notarize and staple the app before zipping.
+      # Signed with StoneForm's self-signed certificate until a Developer ID
+      # is available; that switch also adds notarization before zipping.
       - name: Build and sign the update
         env:
           REPOSITORY: ${{ github.repository }}
+          SIGNING_CERTIFICATE: ${{ secrets.SIGNING_CERTIFICATE }}
+          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: VERSION="${GITHUB_REF_NAME#v}" scripts/release.sh
       - name: Publish

@@ -4,9 +4,21 @@ A small native launcher for WoW: Forever on Apple Silicon Macs: sign in once,
 then StoneForm installs, updates and starts the game. No Battle.net app, no Rosetta.
 
 Status: sign-in, install, updates and launch work; releases are built on
-GitHub and update themselves with Sparkle. Releases are ad-hoc signed until a
-Developer ID is available. The design lives in the
+GitHub and update themselves with Sparkle. Releases are signed with
+StoneForm's own certificate until a Developer ID is available. The design lives in the
 [StoneForm Design](https://claude.ai/artifact/RekR3B2e9W6hjJSZ6xYJJ4) doc.
+
+## Install
+
+Download `StoneForm-<version>.zip` from the
+[latest release](https://github.com/trustybread/stoneform/releases/latest),
+unzip it, and move StoneForm to Applications before opening it, so it can
+update itself.
+
+StoneForm isn't notarized by Apple yet, so macOS blocks the first open
+("Apple could not verify StoneForm…"). Click Done, then open System Settings →
+Privacy & Security, click Open Anyway next to StoneForm, and confirm. That's
+needed once: updates install themselves and open without asking.
 
 ## Run
 
@@ -85,12 +97,25 @@ One-time setup:
    target/sparkle/2.10.1/bin/generate_keys --account stoneform -x sparkle-private-key
    gh secret set SPARKLE_PRIVATE_KEY --env release < sparkle-private-key && rm sparkle-private-key
    ```
-3. In the repository's Settings → Environments, give `release` yourself as a
-   required reviewer, so no release job can read the key without you.
+3. Make the code signing certificate and give it to the release workflow.
+   Save both files in your password manager first. A replacement certificate
+   still updates installed copies, but macOS then asks every user for their
+   Mac password once.
+   ```sh
+   scripts/make-signing-cert.sh
+   base64 -i stoneform-signing.p12 | gh secret set SIGNING_CERTIFICATE --env release
+   gh secret set SIGNING_CERTIFICATE_PASSWORD --env release < stoneform-signing-password.txt
+   rm stoneform-signing.p12 stoneform-signing-password.txt
+   ```
+4. In the repository's Settings → Environments, give `release` yourself as a
+   required reviewer, so no release job can read the secrets without you.
 
-Until releases carry a Developer ID signature, macOS blocks the first open of
-a downloaded copy: open it once from System Settings → Privacy & Security →
-Open Anyway.
+Without a Developer ID, the certificate is self-signed: Gatekeeper treats it
+like no signature at all, hence Open Anyway on the first open. It still
+matters: an ad-hoc signature changes with every build, so after each update
+macOS would ask for the Mac password before StoneForm could read its
+sign-in token. With the certificate, every release has the same identity
+(`scripts/test-self-update.sh` checks that).
 
 ## Test
 

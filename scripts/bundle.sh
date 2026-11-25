@@ -5,9 +5,18 @@
 #   VERSION         marketing version (default: latest v* tag, else 0.1.0)
 #   BUILD_NUMBER    CFBundleVersion, what Sparkle compares (default: commit count)
 #   BUNDLE_ID       bundle identifier (default: io.github.trustybread.stoneform)
-#   SIGN_IDENTITY   codesign identity (default: ad-hoc "-"). A Developer ID
-#                   identity also enables the hardened runtime and a secure
-#                   timestamp, which notarization requires.
+#   SIGNING_CERTIFICATE  a base64 .p12 to sign with, as make-signing-cert.sh
+#                   makes it; it goes into a throwaway keychain, never the
+#                   login keychain. Releases are signed with StoneForm's own
+#                   certificate: unlike an ad-hoc signature, it gives every
+#                   build the same identity, so macOS keeps StoneForm's
+#                   Keychain access across updates instead of asking for the
+#                   Mac password.
+#   SIGNING_CERTIFICATE_PASSWORD  that .p12's password
+#   SIGN_IDENTITY   otherwise, an identity from your keychains (default:
+#                   ad-hoc "-"). A "Developer ID Application" identity also
+#                   gets the hardened runtime and a secure timestamp, which
+#                   notarization requires.
 #   SPARKLE_FEED    appcast URL for self-updates. Only release builds set it,
 #                   so development copies never replace themselves.
 #   SPARKLE_PUBLIC_KEY  EdDSA public key that updates must be signed with
@@ -26,6 +35,23 @@ public_key="${SPARKLE_PUBLIC_KEY:-$(cat macos/sparkle-public-key 2>/dev/null || 
 if [[ -n "$feed" && -z "$public_key" ]]; then
     echo "A build with a feed needs the Sparkle public key (macos/sparkle-public-key)" >&2
     exit 1
+fi
+
+keychain=""
+if [[ -n "${SIGNING_CERTIFICATE:-}" ]]; then
+    keychain_dir="$(mktemp -d)"
+    keychain="$keychain_dir/signing.keychain-db"
+    keychain_password="$(uuidgen)"
+    trap 'security delete-keychain "$keychain" 2>/dev/null || true; rm -rf "$keychain_dir"' EXIT
+    security create-keychain -p "$keychain_password" "$keychain"
+    security set-keychain-settings "$keychain" # no auto-lock while signing
+    printf '%s' "$SIGNING_CERTIFICATE" | base64 --decode > "$keychain_dir/signing.p12"
+    security import "$keychain_dir/signing.p12" -k "$keychain" -T /usr/bin/codesign \
+        -P "${SIGNING_CERTIFICATE_PASSWORD:?SIGNING_CERTIFICATE needs SIGNING_CERTIFICATE_PASSWORD}" >/dev/null
+    rm "$keychain_dir/signing.p12"
+    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
+    identity="$(security find-identity -p codesigning "$keychain" | awk '$1 == "1)" { print $2; exit }')"
+    [[ -n "$identity" ]] || { echo "SIGNING_CERTIFICATE holds no code signing identity" >&2; exit 1; }
 fi
 
 sparkle_dir="$(scripts/fetch-sparkle.sh)"
@@ -80,15 +106,16 @@ plutil -lint -s "$app/Contents/Info.plist"
 
 # Sign inside out: Sparkle's helpers, the framework, then the app.
 sign() {
-    if [[ "$identity" == "-" ]]; then
-        codesign --force --sign - "$@"
-    else
-        codesign --force --sign "$identity" --options runtime --timestamp "$@"
-    fi
+    local options=(--force --sign "$identity")
+    [[ -z "$keychain" ]] || options+=(--keychain "$keychain")
+    # Both need an Apple-issued identity.
+    [[ "$identity" != "Developer ID Application"* ]] || options+=(--options runtime --timestamp)
+    codesign "${options[@]}" "$@"
 }
 sign "$sparkle/Versions/B/Autoupdate"
 sign "$sparkle/Versions/B/Updater.app"
 sign "$sparkle"
 sign "$app"
 codesign --verify --deep --strict "$app"
-echo "Built $app $version ($build_number, $(lipo -archs "$app/Contents/MacOS/StoneForm"), signed: $identity, feed: ${feed:-none})"
+signer="$(codesign -dvv "$app" 2>&1 | sed -n 's/^Authority=//p' | head -1)"
+echo "Built $app $version ($build_number, $(lipo -archs "$app/Contents/MacOS/StoneForm"), signed: ${signer:-ad-hoc}, feed: ${feed:-none})"
